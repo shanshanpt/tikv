@@ -41,6 +41,14 @@ use super::metrics::*;
 const SERVER_TOKEN: Token = Token(1);
 const FIRST_CUSTOM_TOKEN: Token = Token(1024);
 const DEFAULT_COPROCESSOR_BATCH: usize = 50;
+const MAX_STORE_CONNS: u64 = 5;
+
+type StoreConnKey = (u64, u64);
+
+#[inline]
+fn get_store_conn_key(store_id: u64) -> StoreConnKey {
+    return (store_id, store_id % MAX_STORE_CONNS);
+}
 
 pub fn create_event_loop<T, S>(config: &Config) -> Result<EventLoop<Server<T, S>>>
     where T: RaftStoreRouter,
@@ -81,7 +89,7 @@ pub struct Server<T: RaftStoreRouter + 'static, S: StoreAddrResolver> {
 
     // store id -> Token
     // This is for communicating with other raft stores.
-    store_tokens: HashMap<u64, Token>,
+    store_tokens: HashMap<(u64, u64), Token>,
     store_resolving: HashSet<u64>,
 
     ch: ServerChannel<T>,
@@ -179,7 +187,7 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
                     warn!("remove store connection for store {} with token {:?}",
                           store_id,
                           token);
-                    self.store_tokens.remove(&store_id);
+                    self.store_tokens.remove(&get_store_conn_key(store_id));
                 }
 
                 if let Err(e) = event_loop.deregister(&conn.sock) {
@@ -382,13 +390,16 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
                      sock_addr: SocketAddr)
                      -> Result<Token> {
         // We may already create the connection before.
-        if let Some(token) = self.store_tokens.get(&store_id).cloned() {
+        let conn_key = get_store_conn_key(store_id);
+        if let Some(token) = self.store_tokens
+            .get(&conn_key)
+            .cloned() {
             debug!("token already exists for store {}, reuse", store_id);
             return Ok(token);
         }
 
         let token = try!(self.try_connect(event_loop, sock_addr, Some(store_id)));
-        self.store_tokens.insert(store_id, token);
+        self.store_tokens.insert(conn_key, token);
         Ok(token)
     }
 
@@ -432,7 +443,9 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
         }
 
         // check the corresponding token for store.
-        if let Some(token) = self.store_tokens.get(&store_id).cloned() {
+        if let Some(token) = self.store_tokens
+            .get(&get_store_conn_key(store_id))
+            .cloned() {
             return self.write_data(event_loop, token, data);
         }
 
