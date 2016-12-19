@@ -68,6 +68,10 @@ impl ConnData {
         try!(rpc::encode_msg(w, self.msg_id, &self.msg));
         Ok(())
     }
+
+    pub fn get_region_id(&self) -> u64 {
+        self.msg.get_raft().get_region_id()
+    }
 }
 
 impl Display for ConnData {

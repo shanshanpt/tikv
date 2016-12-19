@@ -29,6 +29,22 @@ use super::snap::Task as SnapTask;
 use util::worker::Scheduler;
 use util::buf::PipeBuffer;
 
+const MAX_STORE_CONNS: u64 = 5;
+
+#[derive(Hash, PartialEq, Eq, Clone, Copy)]
+pub struct StoreConnKey {
+    pub store_id: u64,
+    pub index: u64,
+}
+
+impl StoreConnKey {
+    pub fn new(store_id: u64, region_id: u64) -> StoreConnKey {
+        StoreConnKey{
+            store_id: store_id,
+            index: region_id % MAX_STORE_CONNS,
+        }
+    }
+}
 
 #[derive(PartialEq)]
 enum ConnType {
@@ -49,9 +65,9 @@ pub struct Conn {
 
     conn_type: ConnType,
 
-    // store id is for remote store, we only set this
+    // conn_key is for remote store, we only set this
     // when we connect to the remote store.
-    pub store_id: Option<u64>,
+    pub conn_key: Option<StoreConnKey>,
 
     // message header
     last_msg_id: Option<u64>,
@@ -69,7 +85,7 @@ pub struct Conn {
 impl Conn {
     pub fn new(sock: TcpStream,
                token: Token,
-               store_id: Option<u64>,
+               conn_key: Option<StoreConnKey>,
                snap_scheduler: Scheduler<SnapTask>)
                -> Conn {
         Conn {
@@ -80,7 +96,7 @@ impl Conn {
             expect_size: 0,
             last_msg_id: None,
             snap_scheduler: snap_scheduler,
-            store_id: store_id,
+            conn_key: conn_key,
             // TODO: Maybe we should need max size to shrink later.
             send_buffer: PipeBuffer::new(DEFAULT_SEND_BUFFER_SIZE),
             recv_buffer: Some(PipeBuffer::new(DEFAULT_RECV_BUFFER_SIZE)),
