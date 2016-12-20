@@ -1206,7 +1206,7 @@ impl Peer {
             .and_then(|handle| {
                 wb.put_msg_cf(handle, &keys::apply_state_key(self.region_id), &state)
             })
-            .and_then(|_| self.engine.write(wb).map_err(From::from))
+            .and_then(|_| self.engine.write_without_wal(wb).map_err(From::from))
             .unwrap_or_else(|e| {
                 panic!("{} failed to apply empty entry at {}: {:?}",
                        self.tag,

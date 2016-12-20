@@ -39,7 +39,7 @@ pub struct StoreConnKey {
 
 impl StoreConnKey {
     pub fn new(store_id: u64, region_id: u64) -> StoreConnKey {
-        StoreConnKey{
+        StoreConnKey {
             store_id: store_id,
             index: region_id % MAX_STORE_CONNS,
         }

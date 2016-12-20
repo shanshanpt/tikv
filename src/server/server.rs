@@ -381,7 +381,7 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
                      conn_key: StoreConnKey,
                      sock_addr: SocketAddr)
                      -> Result<Token> {
-                        let store_id = conn_key.store_id;
+        let store_id = conn_key.store_id;
         // We may already create the connection before.
         if let Some(token) = self.store_tokens
             .get(&conn_key)

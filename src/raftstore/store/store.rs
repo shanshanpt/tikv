@@ -766,7 +766,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         };
 
         if !wb.is_empty() {
-            self.engine.write(wb).unwrap_or_else(|e| {
+            self.engine.write_without_wal(wb).unwrap_or_else(|e| {
                 panic!("{} failed to save append result: {:?}", self.tag, e);
             });
         }
