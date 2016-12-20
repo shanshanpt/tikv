@@ -611,8 +611,10 @@ impl Peer {
         let mut ready = self.raft_group.ready();
         ready_timer.observe_duration();
 
-        debug!("{} handle raft ready, is leader: {}", self.tag, self.is_leader());
-        
+        debug!("{} handle raft ready, is leader: {}",
+               self.tag,
+               self.is_leader());
+
         self.update_leader_lease(&ready);
 
         self.add_ready_metric(&ready, &mut metrics.ready);
