@@ -11,8 +11,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+
 use std::sync::{Arc, RwLock};
 use std::sync::mpsc::channel;
+use std::sync::mpsc::{Receiver as StdReceiver, TryRecvError};
 use std::collections::{HashMap, HashSet, BTreeMap};
 use std::boxed::Box;
 use std::collections::hash_map::Entry;
@@ -47,7 +49,7 @@ use storage::{ALL_CFS, CF_DEFAULT, CF_LOCK, CF_WRITE};
 use super::worker::{SplitCheckRunner, SplitCheckTask, RegionTask, RegionRunner, CompactTask,
                     CompactRunner, RaftlogGcTask, RaftlogGcRunner, PdRunner, PdTask,
                     ConsistencyCheckTask, ConsistencyCheckRunner};
-use super::{util, Msg, Tick, SnapManager};
+use super::{util, Msg, Tick, SnapshotStatusMsg, SnapManager};
 use super::keys::{self, enc_start_key, enc_end_key, data_end_key, data_key};
 use super::engine::{Iterable, Peekable, Snapshot as EngineSnapshot};
 use super::config::Config;
@@ -67,11 +69,21 @@ const MIO_TICK_RATIO: u64 = 10;
 const THREAD_POOL_RAFT_READY_MIN_REGION_COUNT: usize = 8;
 const RAFT_READY_THREAD_NUM: usize = 4;
 
+
+// A helper structure to bundle all channels for messages to `Store`.
+pub struct StoreChannel {
+    pub sender: Sender<Msg>,
+    pub snapshot_status_receiver: StdReceiver<SnapshotStatusMsg>,
+}
+
 pub struct Store<T: Transport + 'static, C: PdClient + 'static> {
     cfg: Config,
     store: metapb::Store,
     engine: Arc<DB>,
     sendch: SendCh<Msg>,
+
+    sent_snapshot_count: u64,
+    snapshot_status_receiver: StdReceiver<SnapshotStatusMsg>,
 
     // region_id -> peers
     region_peers: HashMap<u64, Peer>,
@@ -130,7 +142,7 @@ pub fn delete_file_in_range(db: &DB, start_key: &[u8], end_key: &[u8]) -> Result
 }
 
 impl<T: Transport, C: PdClient> Store<T, C> {
-    pub fn new(sender: Sender<Msg>,
+    pub fn new(ch: StoreChannel,
                meta: metapb::Store,
                cfg: Config,
                engine: Arc<DB>,
@@ -141,7 +153,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         // TODO: we can get cluster meta regularly too later.
         try!(cfg.validate());
 
-        let sendch = SendCh::new(sender, "raftstore");
+        let sendch = SendCh::new(ch.sender, "raftstore");
         let peer_cache = HashMap::new();
         let tag = format!("[store {}]", meta.get_id());
 
@@ -150,6 +162,8 @@ impl<T: Transport, C: PdClient> Store<T, C> {
             store: meta,
             engine: engine,
             sendch: sendch,
+            sent_snapshot_count: 0,
+            snapshot_status_receiver: ch.snapshot_status_receiver,
             region_peers: HashMap::new(),
             pending_raft_groups: HashSet::new(),
             split_check_worker: Worker::new("split check worker"),
@@ -327,6 +341,54 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         self.peer_cache.clone()
     }
 
+    fn poll_snapshot_status(&mut self) {
+        // if self.sent_snapshot_count == 0 {
+        //     return;
+        // }
+
+        // Poll all snapshot messages and handle them.
+        loop {
+            match self.snapshot_status_receiver.try_recv() {
+                Ok(SnapshotStatusMsg { region_id, to_peer_id, status }) => {
+                    // Report snapshot status to the corresponding peer.
+                    self.report_snapshot_status(region_id, to_peer_id, status);
+                }
+                Err(TryRecvError::Empty) => {
+                    // The snapshot status receiver channel is empty
+                    return;
+                }
+                Err(e) => {
+                    error!("{} unexpected error {:?} when receive from snapshot channel",
+                           self.tag,
+                           e);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn report_snapshot_status(&mut self, region_id: u64, to_peer_id: u64, status: SnapshotStatus) {
+        // self.sent_snapshot_count -= 1;
+        if let Some(mut peer) = self.region_peers.get_mut(&region_id) {
+            let to_peer = match self.peer_cache.rl().get(&to_peer_id).cloned() {
+                Some(peer) => peer,
+                None => {
+                    // If to_peer is gone, ignore this snapshot status
+                    warn!("[region {}] peer {} not found, ignore snapshot status {:?}",
+                          region_id,
+                          to_peer_id,
+                          status);
+                    return;
+                }
+            };
+            info!("[region {}] report snapshot status {:?} {:?}",
+                  region_id,
+                  to_peer,
+                  status);
+            peer.raft_group.report_snapshot(to_peer_id, status)
+        }
+    }
+
     fn register_raft_base_tick(&self, event_loop: &mut EventLoop<Self>) {
         // If we register raft base tick failed, the whole raft can't run correctly,
         // TODO: shutdown the store?
@@ -378,6 +440,8 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 }
             }
         }
+
+        self.poll_snapshot_status();
 
         PEER_RAFT_PROCESS_NANOS_COUNTER_VEC.with_label_values(&["tick"])
             .inc_by(duration_to_nanos(t.elapsed()) as f64)
@@ -734,6 +798,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
                 });
             }
         }
+
         let mut results = vec![];
         for _ in 0..task_num {
             let (region_id, peer, res) = rx.recv().unwrap();
@@ -1515,6 +1580,7 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         }
     }
 
+
     fn on_unreachable(&mut self, region_id: u64, to_peer_id: u64) {
         if let Some(mut peer) = self.region_peers.get_mut(&region_id) {
             peer.raft_group.report_unreachable(to_peer_id);
@@ -1746,9 +1812,6 @@ impl<T: Transport, C: PdClient> mio::Handler for Store<T, C> {
             Msg::SplitCheckResult { region_id, epoch, split_key } => {
                 info!("[region {}] split check complete.", region_id);
                 self.on_split_check_result(region_id, epoch, split_key);
-            }
-            Msg::ReportSnapshot { region_id, to_peer_id, status } => {
-                self.on_report_snapshot(region_id, to_peer_id, status);
             }
             Msg::ReportUnreachable { region_id, to_peer_id } => {
                 self.on_unreachable(region_id, to_peer_id);
