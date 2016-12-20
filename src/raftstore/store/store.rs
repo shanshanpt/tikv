@@ -17,7 +17,7 @@ use std::sync::mpsc::channel;
 use std::sync::mpsc::{Receiver as StdReceiver, TryRecvError};
 use std::collections::{HashMap, HashSet, BTreeMap};
 use std::boxed::Box;
-use std::collections::hash_map::Entry;
+// use std::collections::hash_map::Entry;
 use std::collections::Bound::{Excluded, Unbounded};
 use std::time::{Duration, Instant};
 use std::{cmp, u64};
@@ -66,7 +66,7 @@ type Key = Vec<u8>;
 const ROCKSDB_TOTAL_SST_FILE_SIZE_PROPERTY: &'static str = "rocksdb.total-sst-files-size";
 const MIO_TICK_RATIO: u64 = 10;
 
-const THREAD_POOL_RAFT_READY_MIN_REGION_COUNT: usize = 8;
+// const THREAD_POOL_RAFT_READY_MIN_REGION_COUNT: usize = 8;
 const RAFT_READY_THREAD_NUM: usize = 4;
 
 
@@ -759,34 +759,40 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         self.peer_cache.wl().insert(peer.get_id(), peer);
     }
 
-    fn on_raft_ready_single_thread(&mut self, region_ids: Vec<u64>) -> Vec<(u64, ReadyResult)> {
-        let mut results: Vec<(u64, ReadyResult)> = Vec::with_capacity(region_ids.len());
-        for region_id in region_ids {
-            if let Entry::Occupied(mut peer) = self.region_peers.entry(region_id) {
-                match peer.get_mut().handle_raft_ready(&self.trans) {
-                    Ok(Some(res)) => results.push((region_id, res)),
-                    Ok(None) => {}
-                    Err(e) => {
-                        // TODO: should we panic or shutdown the store?
-                        error!("{} handle raft ready err: {:?}", peer.get_mut().tag, e);
-                    }
-                }
-            };
-        }
-        results
-    }
+    // fn on_raft_ready_single_thread(&mut self, region_ids: Vec<u64>) -> Vec<(u64, ReadyResult)> {
+    //     let mut results: Vec<(u64, ReadyResult)> = Vec::with_capacity(region_ids.len());
+    //     for region_id in region_ids {
+    //         if let Entry::Occupied(mut peer) = self.region_peers.entry(region_id) {
+    //             match peer.get_mut().handle_raft_ready(&self.trans) {
+    //                 Ok(Some(res)) => results.push((region_id, res)),
+    //                 Ok(None) => {}
+    //                 Err(e) => {
+    //                     // TODO: should we panic or shutdown the store?
+    //                     error!("{} handle raft ready err: {:?}", peer.get_mut().tag, e);
+    //                 }
+    //             }
+    //         };
+    //     }
+    //     results
+    // }
 
     fn on_raft_ready_multiple_threads(&mut self, region_ids: Vec<u64>) -> Vec<(u64, ReadyResult)> {
         let (tx, rx) = channel();
         let mut task_num = 0;
         for region_id in region_ids {
             if let Some(mut peer) = self.region_peers.remove(&region_id) {
+                let ready = peer.handle_raft_get_ready(&self.trans, &mut self.raft_metrics);
+                if ready.is_none() {
+                    self.region_peers.insert(region_id, peer);
+                    continue;
+                }
+
                 task_num += 1;
                 let trans = self.trans.clone();
                 let tx = tx.clone();
                 self.raft_ready_worker.execute(move || {
                     let mut result = None;
-                    match peer.handle_raft_ready(&trans) {
+                    match peer.handle_raft_ready(&trans, ready.unwrap()) {
                         Ok(Some(res)) => result = Some(res),
                         Ok(None) => {}
                         Err(e) => {
@@ -815,11 +821,13 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         let region_ids: Vec<_> = self.pending_raft_groups.drain().collect();
         let pending_count = region_ids.len();
 
-        let ready_results = if pending_count < THREAD_POOL_RAFT_READY_MIN_REGION_COUNT {
-            self.on_raft_ready_single_thread(region_ids)
-        } else {
-            self.on_raft_ready_multiple_threads(region_ids)
-        };
+        // let ready_results = if pending_count < THREAD_POOL_RAFT_READY_MIN_REGION_COUNT {
+        //     self.on_raft_ready_single_thread(region_ids)
+        // } else {
+        //     self.on_raft_ready_multiple_threads(region_ids)
+        // };
+
+        let ready_results = self.on_raft_ready_multiple_threads(region_ids);
 
         for (region_id, res) in ready_results {
             self.on_ready_result(region_id, res);

@@ -576,9 +576,12 @@ impl Peer {
         }
     }
 
-    pub fn handle_raft_ready<T: Transport>(&mut self, trans: &T) -> Result<Option<ReadyResult>> {
+    pub fn handle_raft_ready<T: Transport>(&mut self,
+                                           trans: &T,
+                                           ready: Ready)
+                                           -> Result<Option<ReadyResult>> {
         let mut metrics = Default::default();
-        match try!(self.handle_raft_ready_append(trans, &mut metrics)) {
+        match try!(self.handle_raft_ready_append(trans, ready, &mut metrics)) {
             Some(mut res) => {
                 try!(self.handle_raft_ready_apply(&mut res));
                 Ok(Some(res))
@@ -587,31 +590,29 @@ impl Peer {
         }
     }
 
-    pub fn handle_raft_ready_append<T: Transport>(&mut self,
-                                                  trans: &T,
-                                                  metrics: &mut RaftMetrics)
-                                                  -> Result<Option<ReadyResult>> {
+    pub fn handle_raft_get_ready<T: Transport>(&mut self,
+                                               trans: &T,
+                                               metrics: &mut RaftMetrics)
+                                               -> Option<Ready> {
         if self.mut_store().check_applying_snap() {
             // If we continue to handle all the messages, it may cause too many messages because
             // leader will send all the remaining messages to this follower, which can lead
             // to full message queue under high load.
             debug!("{} still applying snapshot, skip further handling.",
                    self.tag);
-            return Ok(None);
+            return None;
         }
 
         if !self.raft_group.has_ready() {
-            return Ok(None);
+            return None;
         }
-
-        debug!("{} handle raft ready", self.tag);
 
         let ready_timer = PEER_GET_READY_HISTOGRAM.start_timer();
         let mut ready = self.raft_group.ready();
         ready_timer.observe_duration();
 
-        let t = SlowTimer::new();
-
+        debug!("{} handle raft ready, is leader: {}", self.tag, self.is_leader());
+        
         self.update_leader_lease(&ready);
 
         self.add_ready_metric(&ready, &mut metrics.ready);
@@ -626,6 +627,17 @@ impl Peer {
                 })
         }
 
+        Some(ready)
+    }
+
+    pub fn handle_raft_ready_append<T: Transport>(&mut self,
+                                                  trans: &T,
+                                                  mut ready: Ready,
+                                                  metrics: &mut RaftMetrics)
+                                                  -> Result<Option<ReadyResult>> {
+        debug!("{} handle raft ready append", self.tag);
+
+        let t = SlowTimer::new();
         let append_timer = PEER_APPEND_LOG_HISTOGRAM.start_timer();
         let apply_result = match self.mut_store().handle_raft_ready(&ready) {
             Ok(r) => r,
@@ -672,6 +684,8 @@ impl Peer {
     }
 
     pub fn handle_raft_ready_apply(&mut self, ready_result: &mut ReadyResult) -> Result<()> {
+        debug!("{} handle raft ready apply", self.tag);
+
         let mut ready = ready_result.ready.take().unwrap_or_else(|| {
             panic!("{} must have a ready in ReadyResult", self.tag);
         });
