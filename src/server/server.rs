@@ -95,6 +95,8 @@ pub struct Server<T: RaftStoreRouter + 'static, S: StoreAddrResolver> {
     resolver: S,
 
     cfg: Config,
+
+    read_msgs: Vec<(Token, Vec<ConnData>)>,
 }
 
 impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
@@ -135,6 +137,7 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
             snap_worker: snap_worker,
             resolver: resolver,
             cfg: cfg.clone(),
+            read_msgs: vec![],
         };
 
         Ok(svr)
@@ -236,11 +239,26 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
             return Ok(());
         }
 
-        for msg in msgs {
-            try!(self.on_conn_msg(token, msg))
-        }
+        self.read_msgs.push((token, msgs));
 
         Ok(())
+    }
+
+    fn handle_read_msgs(&mut self, event_loop: &mut EventLoop<Self>) {
+        if self.read_msgs.is_empty() {
+            return;
+        }
+
+        let read_msgs: Vec<_> = self.read_msgs.drain(..).collect();
+        for (token, msgs) in read_msgs {
+            for data in msgs {
+                if let Err(e) = self.on_conn_msg(token, data) {
+                    debug!("handle read conn for token {:?} err {:?}, remove", token, e);
+                    self.remove_conn(event_loop, token);
+                    break;
+                }
+            }
+        }
     }
 
     fn on_conn_msg(&mut self, token: Token, data: ConnData) -> Result<()> {
@@ -332,7 +350,6 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Server<T, S> {
                     self.remove_conn(event_loop, token);
                 }
             }
-
         }
     }
 
@@ -600,6 +617,8 @@ impl<T: RaftStoreRouter, S: StoreAddrResolver> Handler for Server<T, S> {
     }
 
     fn tick(&mut self, el: &mut EventLoop<Self>) {
+        self.handle_read_msgs(el);
+
         // tick is called in the end of the loop, so if we notify to quit,
         // we will quit the server here.
         // TODO: handle quit server if event_loop is_running() returns false.

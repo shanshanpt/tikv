@@ -763,7 +763,8 @@ impl<T: Transport, C: PdClient> Store<T, C> {
         let mut results: Vec<(u64, ReadyResult)> = Vec::with_capacity(region_ids.len());
         for region_id in region_ids {
             if let Entry::Occupied(mut peer) = self.region_peers.entry(region_id) {
-                let ready = peer.get_mut().handle_raft_get_ready(&self.trans, &mut self.raft_metrics);
+                let ready = peer.get_mut()
+                    .handle_raft_get_ready(&self.trans, &mut self.raft_metrics);
                 if ready.is_none() {
                     break;
                 }
